@@ -29,23 +29,23 @@ export def main [sub: string, url?: string] {
 export def "streamliner github" [url: string] {
     if ($url | is-empty) { error make { msg: "usage: streamliner github <url>" } }
     let parsed = ($url | url parse)
-    { items: (sl github-items $parsed) }
+    sl github-items $parsed
 }
 
 export def "streamliner gitlab" [url: string] {
     if ($url | is-empty) { error make { msg: "usage: streamliner gitlab <url>" } }
     let parsed = ($url | url parse)
-    { items: (sl gitlab-items $parsed) }
+    sl gitlab-items $parsed
 }
 
 export def "streamliner rss" [url: string] {
     if ($url | is-empty) { error make { msg: "usage: streamliner rss <url>" } }
-    { items: (sl rss-or-atom-items $url) }
+    sl rss-or-atom-items $url
 }
 
 export def "streamliner http" [url: string] {
     if ($url | is-empty) { error make { msg: "usage: streamliner http <url>" } }
-    { items: (sl http-items $url) }
+    sl http-items $url
 }
 
 # Backward compat: autodetect route
@@ -141,56 +141,66 @@ export def "sl gitlab-items" [parsed: record] {
     $issues | append $mrs
 }
 
-# RSS/Atom via http + from xml
+# RSS/Atom via simple XML traversal
 export def "sl rss-or-atom-items" [url: string] {
-    let raw = (http get $url)
-    let xml = ($raw.body | from xml)
+    # Get the XML content from the URL
+    let xml = (http get -r $url | from xml)
 
-    # Try RSS first: rss.channel.item
-    let rss_items = ($xml.rss.channel.item? | default [])
-    if ($rss_items | is-not-empty) {
-        return ($rss_items | each {|it|
-            let title = ($it.title? | default "")
-            let summary = ($it.description? | default "")
+    # Simple RSS path
+    let rss_try = (do -i {
+        $xml
+        | get content | get content | get 0
+        | where tag == item
+        | get content
+        | each {|it|
+            let title = ($it | where tag == title | get content | flatten | get 0? | get content? | default "")
+            let link = ($it | where tag == link | get content | flatten | get 0? | get content? | default "")
+            let desc = ($it | where tag == description | get content | flatten | get 0? | get content? | default "")
+            let pubDate = ($it | where tag == pubDate | get content | flatten | get 0? | get content? | default null | into datetime)
             {
-                url: ($it.link? | default ""),
+                url: $link,
                 title: $title,
-                content: (if ($summary | is-empty) { $title } else { $"($title)\n\n($summary)" }),
+                content: (if ($desc | is-empty) { $title } else { $"($title)\n\n($desc)" }),
                 needs_further_processing: true,
                 source: "rss",
-                timestamp: ($it.pubDate? | into datetime | default null)
+                type: "http",
+                timestamp: $pubDate
             }
-        })
-    }
+        }
+    })
 
-    # Atom: feed.entry
-    let atom_items = ($xml.feed.entry? | default [])
-    if ($atom_items | is-not-empty) {
-        return ($atom_items | each {|it|
+    if ($rss_try | is-not-empty) { return $rss_try }
+
+    # Simple Atom path
+    let atom_try = (do -i {
+        $xml
+        | get content | get feed | get entry
+        | each {|it|
             let title = ($it.title? | default "")
             let link = (do {
                 let l = ($it.link? | default {})
                 if ($l.@href? | is-empty) { $l | to text } else { $l.@href }
             })
-            let summary = ($it.summary? | default ($it.content? | default ""))
+            let sum = ($it.summary? | default ($it.content? | default ""))
             {
                 url: ($link | default ""),
                 title: $title,
-                content: (if ($summary | is-empty) { $title } else { $"($title)\n\n($summary)" }),
+                content: (if ($sum | is-empty) { $title } else { $"($title)\n\n($sum)" }),
                 needs_further_processing: true,
                 source: "atom",
                 timestamp: ($it.updated? | into datetime | default null)
             }
-        })
-    }
+        }
+    })
+
+    if ($atom_try | is-not-empty) { return $atom_try }
 
     []
 }
 
 # HTTP: fetch a single web page and return as one item
 export def "sl http-items" [url: string] {
-    let resp = (http get $url)
-    let body = ($resp.body | into string)
+    let body = (http get $url | into string)
     let title = (do {
         let m = ($body | parse --regex '(?is)<title>(.*?)</title>' | get capture0? | get 0? | default "")
         if ($m | is-empty) { $url } else { $m | str trim }
